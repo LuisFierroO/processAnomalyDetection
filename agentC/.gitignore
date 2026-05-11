@@ -1,0 +1,8 @@
+*.o
+
+anomaly_detection_agent
+
+*.md
+
+.claude
+
