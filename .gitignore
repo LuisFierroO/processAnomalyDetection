@@ -1,0 +1,21 @@
+# Maven build output
+anomalyBackend/target/
+
+# Compiled C agent binary inside resources
+anomalyBackend/src/main/resources/anomaly_detection_agent
+
+# Node modules
+anomalyFrontend/node_modules/
+
+# Doxygen generated docs
+agentC/html/
+agentC/latex/
+
+# Claude Code internal settings
+.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
