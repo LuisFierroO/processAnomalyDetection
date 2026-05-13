@@ -35,6 +35,14 @@ public class SseService {
     }
 
     public void broadcast(Object payload) {
+        send(null, payload);
+    }
+
+    public void broadcastNamed(String eventName, Object payload) {
+        send(eventName, payload);
+    }
+
+    private void send(String eventName, Object payload) {
         if (emitters.isEmpty()) return;
         String json;
         try {
@@ -46,7 +54,9 @@ public class SseService {
         List<SseEmitter> dead = new ArrayList<>();
         for (SseEmitter emitter : emitters) {
             try {
-                emitter.send(SseEmitter.event().data(json).build());
+                SseEmitter.SseEventBuilder ev = SseEmitter.event().data(json);
+                if (eventName != null) ev.name(eventName);
+                emitter.send(ev.build());
             } catch (IOException e) {
                 dead.add(emitter);
             }

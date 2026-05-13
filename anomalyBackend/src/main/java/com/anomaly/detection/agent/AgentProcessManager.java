@@ -63,8 +63,8 @@ public class AgentProcessManager implements ApplicationRunner {
     private void runAgentLoop() {
         log.info("Starting agent: {} --json --include-all --cycles 999999 --interval-ms {}",
                  agentBinaryPath, intervalMs);
-
         ProcessBuilder pb = new ProcessBuilder(
+                "sudo",
                 agentBinaryPath,
                 "--json", "--include-all",
                 "--cycles", "999999",

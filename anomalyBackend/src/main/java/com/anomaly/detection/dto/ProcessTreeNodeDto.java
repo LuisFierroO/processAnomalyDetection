@@ -12,5 +12,6 @@ public record ProcessTreeNodeDto(
         @JsonProperty("anomaly_score") double anomalyScore,
         @JsonProperty("cpu_percent")   double cpuPercent,
         @JsonProperty("rss_kb")        double rssKb,
+        @JsonProperty("alert_flags")   int alertFlags,
         String username
 ) {}

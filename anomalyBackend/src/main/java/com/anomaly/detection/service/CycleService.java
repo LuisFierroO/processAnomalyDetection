@@ -5,6 +5,11 @@ import com.anomaly.detection.dto.ProcessDto;
 import com.anomaly.detection.dto.ProcessTreeNodeDto;
 import com.anomaly.detection.model.*;
 import com.anomaly.detection.repository.CycleRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,12 +21,20 @@ import java.util.stream.Collectors;
 @Service
 public class CycleService {
 
-    private final CycleRepository cycleRepository;
-    private final SseService sseService;
+    private static final Logger log = LoggerFactory.getLogger(CycleService.class);
 
-    public CycleService(CycleRepository cycleRepository, SseService sseService) {
+    @Value("${retention.max-cycles:50000}")
+    private int maxCycles;
+
+    private final CycleRepository        cycleRepository;
+    private final SseService             sseService;
+    private final SuspiciousEventService eventService;
+
+    public CycleService(CycleRepository cycleRepository, SseService sseService,
+                        SuspiciousEventService eventService) {
         this.cycleRepository = cycleRepository;
-        this.sseService = sseService;
+        this.sseService      = sseService;
+        this.eventService    = eventService;
     }
 
     @Transactional
@@ -49,6 +62,8 @@ public class CycleService {
             dto.processTree().forEach(n -> addTreeNode(cycle, n));
 
         AnalysisCycle saved = cycleRepository.save(cycle);
+
+        eventService.maybeRecord(dto, saved.getId());
 
         sseService.broadcast(new LiveCycleEvent(
                 saved.getId(),
@@ -128,6 +143,19 @@ public class CycleService {
         cycle.getProcesses().add(r);
     }
 
+    @Scheduled(fixedDelay = 30_000)
+    @Transactional
+    public void pruneOldCycles() {
+        long count = cycleRepository.count();
+        if (count <= maxCycles) return;
+        int toDelete = (int) Math.min(count - maxCycles, 1000);
+        List<Long> ids = cycleRepository.findOldestIds(PageRequest.of(0, toDelete));
+        if (!ids.isEmpty()) {
+            cycleRepository.deleteAllById(ids);
+            log.debug("Pruned {} old cycles (total was {})", ids.size(), count);
+        }
+    }
+
     private void addTreeNode(AnalysisCycle cycle, ProcessTreeNodeDto dto) {
         ProcessTreeRecord n = new ProcessTreeRecord();
         n.setCycle(cycle);
@@ -140,6 +168,7 @@ public class CycleService {
         n.setAnomalyScore(dto.anomalyScore());
         n.setCpuPercent(dto.cpuPercent());
         n.setRssKb(dto.rssKb());
+        n.setAlertFlags(dto.alertFlags());
         n.setUsername(dto.username());
         cycle.getProcessTree().add(n);
     }

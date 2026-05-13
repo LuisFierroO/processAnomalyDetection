@@ -22,9 +22,10 @@ public class ProcessTreeRecord {
     private String state;
     private int threads;
     private boolean suspicious;
-    private double anomalyScore;
-    private double cpuPercent;
-    private double rssKb;
+    private double  anomalyScore;
+    private double  cpuPercent;
+    private double  rssKb;
+    private int     alertFlags;
 
     @Column(length = 64)
     private String username;
@@ -52,6 +53,8 @@ public class ProcessTreeRecord {
     public void setCpuPercent(double cpuPercent) { this.cpuPercent = cpuPercent; }
     public double getRssKb() { return rssKb; }
     public void setRssKb(double rssKb) { this.rssKb = rssKb; }
+    public int getAlertFlags() { return alertFlags; }
+    public void setAlertFlags(int alertFlags) { this.alertFlags = alertFlags; }
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }
 }
