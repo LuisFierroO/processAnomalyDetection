@@ -50,6 +50,7 @@
 #define ALERT_HIGH_IO_W   (1 << 8)  /**< Fuzzy: write throughput in ramp 5–10 MB/s.     */
 #define ALERT_HIGH_IO_R   (1 << 9)  /**< Fuzzy: read throughput in ramp 25–50 MB/s.     */
 #define ALERT_ZOMBIE      (1 << 10) /**< Process state is Z: terminated but not reaped. */
+#define ALERT_ZOMBIE_PARENT (1 << 11) /**< Process has unreaped zombie children (not calling wait). */
 /** @} */
 
 /* ── DIP: Named threshold constants ─────────────────────────────────────── */
@@ -101,8 +102,9 @@ typedef struct {
     unsigned long stime;          /**< CPU ticks in kernel mode (cumulative).       */
     unsigned long prev_utime;     /**< utime from the previous snapshot (for delta).*/
     unsigned long prev_stime;     /**< stime from the previous snapshot (for delta).*/
-    unsigned long fork_rate;      /**< Fork rate in calls per second.               */
-    unsigned long syscall_rate;   /**< Syscall rate per second (reserved).          */
+    unsigned long fork_rate;        /**< Fork rate in calls per second.               */
+    unsigned long syscall_rate;     /**< Syscall rate per second (reserved).          */
+    int           zombie_child_count; /**< Number of direct children in state Z.      */
     unsigned long io_read_bytes;  /**< Bytes read accumulated since process start.  */
     unsigned long io_write_bytes; /**< Bytes written accumulated since process start.*/
     double        io_read_bps;    /**< Read rate in bytes/second (last interval).   */
@@ -199,6 +201,7 @@ typedef struct {
     float cpu_percent;
     float rss_kb;
     char  username[64];   /**< Login name of the real UID owner.        */
+    int   alert_flags;    /**< Bitmask of active ALERT_* flags.         */
 } ProcessTreeNode;
 
 /* ── Analysis result ─────────────────────────────────────────────────────── */
@@ -209,7 +212,7 @@ typedef struct {
 /** Sampling window between the two /proc snapshots used to compute CPU/IO rates.
  *  Shorter = faster cycles; longer = smoother CPU% readings.
  *  250 ms is the default (was 1000 ms). */
-#define SAMPLE_INTERVAL_MS 250
+#define SAMPLE_INTERVAL_MS 50
 
 /**
  * @brief Full output of a single analysis cycle.

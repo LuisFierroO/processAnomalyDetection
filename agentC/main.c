@@ -17,17 +17,33 @@
 
 #include "processAgent.h"
 
-
 void printHelp(const char *prog);
 
 /* ── Signal handling ─────────────────────────────────────────────────────── */
 
 static volatile sig_atomic_t g_stop = 0;
 
-static void handle_stop(int sig) { (void)sig; g_stop = 1; }
+/**
+ * @brief Signal handler for SIGTERM and SIGINT.
+ *
+ * Sets g_stop so the main loop exits cleanly after the current cycle
+ * completes, rather than terminating mid-write.
+ */
+static void handle_stop(int sig) {
+     (void)sig; g_stop = 1;
+}
 
 /* ── Flag parsing helpers ────────────────────────────────────────────────── */
 
+/**
+ * @brief Returns 1 if short_f or long_f appears anywhere in argv.
+ *
+ * @param argc    Argument count from main().
+ * @param argv    Argument vector from main().
+ * @param short_f Short flag string (e.g. "-j").
+ * @param long_f  Long flag string  (e.g. "--json").
+ * @return 1 if either form is present, 0 otherwise.
+ */
 static int has_flag(int argc, char *argv[], const char *short_f, const char *long_f) {
     for (int i = 1; i < argc; i++)
         if (strcmp(argv[i], short_f) == 0 || strcmp(argv[i], long_f) == 0)
@@ -35,10 +51,21 @@ static int has_flag(int argc, char *argv[], const char *short_f, const char *lon
     return 0;
 }
 
-/* Returns the integer value following short_f or long_f, or default_val if absent. */
-static int get_int_arg(int argc, char *argv[],
-                       const char *short_f, const char *long_f,
-                       int default_val) {
+/**
+ * @brief Returns the integer value of the argument following short_f or long_f.
+ *
+ * Scans argv for the first occurrence of either flag form and converts the
+ * next token with atoi(). Returns default_val when the flag is absent or
+ * the parsed value is non-positive.
+ *
+ * @param argc        Argument count from main().
+ * @param argv        Argument vector from main().
+ * @param short_f     Short flag string (e.g. "-n").
+ * @param long_f      Long flag string  (e.g. "--cycles").
+ * @param default_val Value to return when the flag is absent.
+ * @return Parsed positive integer, or default_val.
+ */
+static int get_int_arg(int argc, char *argv[], const char *short_f, const char *long_f, int default_val){
     for (int i = 1; i < argc - 1; i++) {
         if (strcmp(argv[i], short_f) == 0 || strcmp(argv[i], long_f) == 0) {
             int v = atoi(argv[i + 1]);
@@ -63,15 +90,17 @@ int main(int argc, char *argv[]) {
     int include_all = has_flag(argc, argv, "-a", "--include-all");
     int cycles      = get_int_arg(argc, argv, "-n", "--cycles",      1);
     int interval_ms = get_int_arg(argc, argv, "-w", "--interval-ms", 0);
+    int want_help   = has_flag(argc, argv, "-h", "--help");
+    int inspect     = has_flag(argc, argv, "-i", "--inspect");
 
     if (argc > 1) {
 
-        if (has_flag(argc, argv, "-h", "--help")) {
+        if (want_help) {
             printHelp(argv[0]);
             return 0;
         }
 
-        if (has_flag(argc, argv, "-i", "--inspect")) {
+        if (inspect) {
             int pid = 0;
             for (int i = 1; i < argc - 1; i++) {
                 if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--inspect") == 0) {
@@ -104,12 +133,19 @@ int main(int argc, char *argv[]) {
         /* Reject truly unknown flags. */
         for (int i = 1; i < argc; i++) {
             const char *a = argv[i];
-            if (strcmp(a, "-j") == 0 || strcmp(a, "--json") == 0)        continue;
-            if (strcmp(a, "-a") == 0 || strcmp(a, "--include-all") == 0) continue;
-            if ((strcmp(a, "-n") == 0 || strcmp(a, "--cycles") == 0)
-                && i + 1 < argc) { i++; continue; }
-            if ((strcmp(a, "-w") == 0 || strcmp(a, "--interval-ms") == 0)
-                && i + 1 < argc) { i++; continue; }
+            if (strcmp(a, "-j") == 0 || strcmp(a, "--json") == 0) 
+                continue;
+            if (strcmp(a, "-a") == 0 || strcmp(a, "--include-all") == 0) 
+                continue;
+            if ((strcmp(a, "-n") == 0 || strcmp(a, "--cycles") == 0) && i + 1 < argc) {
+                    i++;
+                    continue; 
+            }
+            if ((strcmp(a, "-w") == 0 || strcmp(a, "--interval-ms") == 0) && i + 1 < argc){ 
+                    i++; 
+                    continue; 
+                
+            }
             fprintf(stderr, "Unknown option: %s\n", a);
             fprintf(stderr, "Run '%s --help' for usage information.\n", argv[0]);
             return 1;
@@ -126,8 +162,8 @@ int main(int argc, char *argv[]) {
         struct timeval ts;
         gettimeofday(&ts, NULL);
 
-        AnalysisResult *ar = analize_full(include_all);
-        if (!ar) {
+        AnalysisResult *analysis_result = analize_full(include_all);
+        if (!analysis_result) {
             fprintf(stderr, "Error: analysis failed.\n");
             return 1;
         }
@@ -139,94 +175,95 @@ int main(int argc, char *argv[]) {
             printf("  \"cycle\": %d,\n", cycle);
             printf("  \"timestamp\": %ld.%06ld,\n",
                    (long)ts.tv_sec, (long)ts.tv_usec);
-            printf("  \"total_processes\": %d,\n",    ar->tree_count);
-            printf("  \"suspicious_count\": %d,\n",   ar->suspicious_count);
-            printf("  \"notable_count\": %d,\n",      ar->notable_count);
-            printf("  \"top_resources_count\": %d",   ar->top_resources_count);
+            printf("  \"total_processes\": %d,\n",    analysis_result->tree_count);
+            printf("  \"suspicious_count\": %d,\n",   analysis_result->suspicious_count);
+            printf("  \"notable_count\": %d,\n",      analysis_result->notable_count);
+            printf("  \"top_resources_count\": %d",   analysis_result->top_resources_count);
 
-            if (ar->tree) {
+            if (analysis_result->tree) {
                 printf(",\n  \"process_tree\": [");
-                for (int i = 0; i < ar->tree_count; i++) {
+                for (int i = 0; i < analysis_result->tree_count; i++) {
                     if (i > 0) printf(",");
                     printf("\n    {\"pid\": %d, \"ppid\": %d, \"name\": ",
-                           ar->tree[i].pid, ar->tree[i].ppid);
-                    json_print_str(ar->tree[i].name);
+                           analysis_result->tree[i].pid, analysis_result->tree[i].ppid);
+                    json_print_str(analysis_result->tree[i].name);
                     printf(", \"state\": \"%c\", \"threads\": %d,"
                            " \"suspicious\": %s, \"anomaly_score\": %.4f,"
-                           " \"cpu_percent\": %.2f, \"rss_kb\": %.0f, \"username\": ",
-                           ar->tree[i].state, ar->tree[i].threads,
-                           ar->tree[i].is_suspicious ? "true" : "false",
-                           ar->tree[i].anomaly_score,
-                           ar->tree[i].cpu_percent,
-                           ar->tree[i].rss_kb);
-                    json_print_str(ar->tree[i].username[0] ? ar->tree[i].username : "");
+                           " \"cpu_percent\": %.2f, \"rss_kb\": %.0f,"
+                           " \"alert_flags\": %d, \"username\": ",
+                            analysis_result->tree[i].state,
+                            analysis_result->tree[i].threads,
+                            analysis_result->tree[i].is_suspicious ? "true" : "false",
+                            analysis_result->tree[i].anomaly_score,
+                            analysis_result->tree[i].cpu_percent,
+                            analysis_result->tree[i].rss_kb,
+                            analysis_result->tree[i].alert_flags);
+                    json_print_str(analysis_result->tree[i].username[0] ? analysis_result->tree[i].username : "");
                     printf("}");
                 }
-                if (ar->tree_count > 0) printf("\n  ");
+                if (analysis_result->tree_count > 0) printf("\n  ");
                 printf("]");
             }
-
             /* suspicious_processes */
             printf(",\n  \"suspicious_processes\": [");
-            for (int i = 0; i < ar->suspicious_count; i++) {
+            for (int i = 0; i < analysis_result->suspicious_count; i++) {
                 if (i > 0) printf(",");
                 printf("\n    ");
-                printProcessJson(ar->suspicious[i]);
+                printProcessJson(analysis_result->suspicious[i]);
             }
-            if (ar->suspicious_count > 0) printf("\n  ");
+            if (analysis_result->suspicious_count > 0) printf("\n  ");
             printf("]");
-
             /* notable_processes */
             printf(",\n  \"notable_processes\": [");
-            for (int i = 0; i < ar->notable_count; i++) {
+            for (int i = 0; i < analysis_result->notable_count; i++) {
                 if (i > 0) printf(",");
                 printf("\n    ");
-                printProcessJson(ar->notable[i]);
+                printProcessJson(analysis_result->notable[i]);
             }
-            if (ar->notable_count > 0) printf("\n  ");
+            if (analysis_result->notable_count > 0) printf("\n  ");
             printf("]");
 
             /* top_resources */
             printf(",\n  \"top_resources\": [");
-            for (int i = 0; i < ar->top_resources_count; i++) {
+            for (int i = 0; i < analysis_result->top_resources_count; i++) {
                 if (i > 0) printf(",");
                 printf("\n    ");
-                printProcessJson(ar->top_resources[i]);
+                printProcessJson(analysis_result->top_resources[i]);
             }
-            if (ar->top_resources_count > 0) printf("\n  ");
+            if (analysis_result->top_resources_count > 0) printf("\n  ");
             printf("]\n}\n");
             fflush(stdout);
         } else {
-            if (ar->suspicious_count == 0 && ar->notable_count == 0
-                && ar->top_resources_count == 0) {
+            if (analysis_result->suspicious_count == 0 && analysis_result->notable_count == 0
+                && analysis_result->top_resources_count == 0) {
                 printf("No processes of interest detected.\n");
             } else {
-                if (ar->suspicious_count > 0) {
+                if (analysis_result->suspicious_count > 0) {
                     printf("\n=== Suspicious processes (%d) ===\n\n",
-                           ar->suspicious_count);
-                    for (int i = 0; i < ar->suspicious_count; i++) {
-                        printProcessAlerts(ar->suspicious[i]);
-                        printProcessInfo(ar->suspicious[i]);
+                           analysis_result->suspicious_count);
+                    for (int i = 0; i < analysis_result->suspicious_count; i++) {
+                        printProcessAlerts(analysis_result->suspicious[i]);
+                        printProcessInfo(analysis_result->suspicious[i]);
                     }
                 }
-                if (ar->notable_count > 0) {
+                if (analysis_result->notable_count > 0) {
                     printf("\n=== Notable processes — score %.2f to %.2f (%d) ===\n\n",
-                           NOTABLE_THRESHOLD, ANOMALY_THRESHOLD, ar->notable_count);
-                    for (int i = 0; i < ar->notable_count; i++) {
-                        printProcessAlerts(ar->notable[i]);
-                        printProcessInfo(ar->notable[i]);
+                           NOTABLE_THRESHOLD, ANOMALY_THRESHOLD, analysis_result->notable_count);
+                    for (int i = 0; i < analysis_result->notable_count; i++) {
+                        printProcessAlerts(analysis_result->notable[i]);
+                        printProcessInfo(analysis_result->notable[i]);
                     }
                 }
-                if (ar->top_resources_count > 0) {
+                if (analysis_result->top_resources_count > 0) {
                     printf("\n=== Top resource consumers (%d) ===\n\n",
-                           ar->top_resources_count);
-                    for (int i = 0; i < ar->top_resources_count; i++)
-                        printProcessInfo(ar->top_resources[i]);
+                           analysis_result->top_resources_count);
+                    for (int i = 0; i < analysis_result->top_resources_count; i++)
+                        printProcessInfo(analysis_result->top_resources[i]);
                 }
             }
         }
 
-        free_analysis_result(ar);
+        free_analysis_result(analysis_result);
 
         if (!g_stop && cycle < cycles && interval_ms > 0) {
             struct timespec ts_sleep = {
@@ -267,6 +304,7 @@ void printHelp(const char *prog) {
         "  PTRACE        Process is being traced (TracerPid != 0)    (+20%%)\n"
         "  SUSP_PATH     Open FD pointing to /tmp, /dev/shm, etc.   (+15%%)\n"
         "  ZOMBIE        State Z: terminated but parent not waiting  (+35%%)\n"
+        "  ZOMBIE_PARENT Has unreaped zombie children (not calling wait) (+40%%)\n"
         "\n"
         "Alert flags (fuzzy — weight proportional to metric value):\n"
         "  HIGH_FD       Open file descriptors  ramp: 250 → 500     (max +15%%)\n"

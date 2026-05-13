@@ -52,6 +52,15 @@ static int           s_net_table_ready = 0;
 
 /* ── PID management and snapshots ───────────────────────────────────────── */
 
+/**
+ * @brief Reads /proc and returns an array of all currently running PIDs.
+ *
+ * Iterates every entry in /proc whose name is a pure digit string.
+ * The array doubles in capacity on overflow (starts at 512).
+ *
+ * @param count  Out: number of PIDs returned.
+ * @return Heap-allocated int array, or NULL on failure. Caller must free().
+ */
 int *getPids(int *count) {
     DIR *dir = opendir("/proc");
     if (!dir) { perror("opendir /proc"); *count = 0; return NULL; }
@@ -77,6 +86,18 @@ int *getPids(int *count) {
     return pids;
 }
 
+/**
+ * @brief Updates the PID snapshot with a new set of PIDs.
+ *
+ * On the first call (snapshot->firstTime == 1) it records the initial state.
+ * On subsequent calls it rotates current→previous and records the new state,
+ * computing the elapsed time between the two snapshots.
+ * Ownership of pids is transferred; this function frees it.
+ *
+ * @param snapshot  Snapshot to update (created with initPidSnapshot()).
+ * @param pids      Current PID array. Freed by this function.
+ * @param count     Number of entries in pids.
+ */
 void takeSnapshot(PidSnapshot *snapshot, int *pids, int count) {
     if (snapshot->firstTime == 1) {
         snapshot->firstTime  = 0;
@@ -104,6 +125,13 @@ void takeSnapshot(PidSnapshot *snapshot, int *pids, int count) {
     }
 }
 
+/**
+ * @brief Prints PIDs that appeared or disappeared between the two snapshots.
+ *
+ * Diagnostic helper only; not used in production analysis cycles.
+ *
+ * @param snapshot  Snapshot with both current and previous PID sets populated.
+ */
 void diffSnapshot(PidSnapshot *snapshot) {
     for (int i = 0; i < snapshot->actCount; i++)
         if (snapshot->act[snapshot->actPids[i]] != snapshot->prev[snapshot->actPids[i]])
@@ -118,6 +146,13 @@ void diffSnapshot(PidSnapshot *snapshot) {
                snapshot->prevCount, snapshot->actCount);
 }
 
+/**
+ * @brief Allocates and zero-initialises a PidSnapshot.
+ *
+ * @param size  Maximum number of PIDs the actPids/prevPids arrays will hold.
+ * @return Heap-allocated PidSnapshot, or NULL on failure.
+ *         Caller must free actPids, prevPids, and the struct (or use free_ex_resources()).
+ */
 PidSnapshot *initPidSnapshot(int size) {
     PidSnapshot *snapshot = malloc(sizeof(PidSnapshot));
     if (!snapshot) { perror("malloc initPidSnapshot"); return NULL; }
@@ -144,6 +179,12 @@ PidSnapshot *initPidSnapshot(int size) {
     return snapshot;
 }
 
+/**
+ * @brief Diagnostic helper: prints all PIDs in an array to stdout.
+ *
+ * @param pids   Array of PIDs to print.
+ * @param count  Number of entries in pids.
+ */
 void printPids(int *pids, int count) {
     printf("PIDs found:\n");
     for (int i = 0; i < count; i++) printf("|%d|,", pids[i]);
@@ -153,6 +194,18 @@ void printPids(int *pids, int count) {
 
 /* ── /proc data capture helpers ─────────────────────────────────────────── */
 
+/**
+ * @brief Populates ProcessInfo fields from /proc/<pid>/stat.
+ *
+ * Extracts name, state, ppid, thread count, start time, CPU tick counters,
+ * RSS, and VSZ. When prev is non-NULL and elapsed_ms > 0 it also computes
+ * the instantaneous CPU usage for the interval.
+ *
+ * @param info        Destination struct (pid must already be set).
+ * @param pid         Target process ID.
+ * @param elapsed_ms  Milliseconds since prev was captured; 0 skips CPU delta.
+ * @param prev        Previous capture for the same PID (may be NULL).
+ */
 static void fillFromStat(ProcessInfo *info, int pid,
                           double elapsed_ms, const ProcessInfo *prev) {
     char path[64];
@@ -217,6 +270,15 @@ static void fillFromStat(ProcessInfo *info, int pid,
     }
 }
 
+/**
+ * @brief Populates identity fields from /proc/<pid>/status.
+ *
+ * Reads real/effective/saved UIDs and GIDs, resolves the username via
+ * getpwuid_r(), and detects ptrace by checking TracerPid.
+ *
+ * @param info  Destination struct (pid must already be set).
+ * @param pid   Target process ID.
+ */
 static void fillFromStatus(ProcessInfo *info, int pid) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/status", pid);
@@ -248,6 +310,15 @@ static void fillFromStatus(ProcessInfo *info, int pid) {
     fclose(f);
 }
 
+/**
+ * @brief Reads /proc/<pid>/cmdline and stores it in info->cmdline.
+ *
+ * The kernel separates arguments with NUL bytes; this function replaces
+ * them with spaces so the result is a single printable string.
+ *
+ * @param info  Destination struct.
+ * @param pid   Target process ID.
+ */
 static void fillCmdline(ProcessInfo *info, int pid) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
@@ -264,6 +335,15 @@ static void fillCmdline(ProcessInfo *info, int pid) {
         if (info->cmdline[i] == '\0') info->cmdline[i] = ' ';
 }
 
+/**
+ * @brief Computes the SHA-256 hash of info->identity.exe_path.
+ *
+ * Streams the binary in 4 KiB chunks using the OpenSSL EVP API.
+ * Stores the 64-character lowercase hex string in info->identity.exe_hash.
+ * On any error the field is set to an empty string.
+ *
+ * @param info  ProcessInfo whose exe_path has already been populated.
+ */
 static void computeExeHash(ProcessInfo *info) {
     int fd = open(info->identity.exe_path, O_RDONLY);
     if (fd == -1) { info->identity.exe_hash[0] = '\0'; return; }
@@ -289,6 +369,16 @@ static void computeExeHash(ProcessInfo *info) {
     info->identity.exe_hash[hash_len * 2] = '\0';
 }
 
+/**
+ * @brief Resolves /proc/<pid>/exe, detects deleted binaries, and computes the exe hash.
+ *
+ * Checks the exe hash cache first (keyed by pid + startTime). On a cache miss
+ * it calls computeExeHash() and stores the result for the next cycle.
+ * The " (deleted)" kernel suffix is stripped and is_deleted_exe is set.
+ *
+ * @param info  Destination struct (pid and startTime must already be set).
+ * @param pid   Target process ID.
+ */
 static void fillExePath(ProcessInfo *info, int pid) {
     char link[64];
     snprintf(link, sizeof(link), "/proc/%d/exe", pid);
@@ -324,8 +414,19 @@ static const char *SUSPICIOUS_PREFIXES[] = {
     "/tmp/", "/dev/shm/", "/run/shm/", "/var/tmp/"
 };
 
-/* Single pass over /proc/<pid>/fd: collects fd stats, suspicious paths,
-   and socket inodes without opening the directory twice. */
+/**
+ * @brief Single-pass scan of /proc/<pid>/fd.
+ *
+ * Counts all open file descriptors, collects up to MAX_SOCK_INODES socket
+ * inodes for later network resolution, and records up to 4 suspicious paths
+ * (targets under /tmp, /dev/shm, /run/shm, /var/tmp).
+ * Avoids opening /proc/<pid>/fd twice by doing everything in one readdir loop.
+ *
+ * @param info        Destination struct.
+ * @param pid         Target process ID.
+ * @param sock_inodes Output array of socket inodes (caller-allocated, MIN size MAX_SOCK_INODES).
+ * @param sock_count  Out: number of socket inodes written to sock_inodes.
+ */
 static void fillFdAndSockets(ProcessInfo *info, int pid,
                               unsigned long *sock_inodes, int *sock_count) {
     *sock_count = 0;
@@ -375,6 +476,19 @@ static void fillFdAndSockets(ProcessInfo *info, int pid,
 
 /* ── Network inode table (built once per cycle) ──────────────────────────── */
 
+/**
+ * @brief Inserts or updates an entry in the global network inode hash table.
+ *
+ * Uses open addressing with Knuth multiplicative hashing. Silently drops
+ * entries if the table is full (extremely unlikely with NET_TABLE_SLOTS=16384).
+ *
+ * @param inode   Socket inode number (key).
+ * @param lp      Local port.
+ * @param ri      Remote IPv4 address (network byte order).
+ * @param rp      Remote port.
+ * @param state   TCP/UDP state (e.g. 0x01=ESTABLISHED, 0x0A=LISTEN).
+ * @param is_tcp  1 for TCP, 0 for UDP.
+ */
 static void net_table_insert(unsigned long inode, unsigned int lp,
                               unsigned int ri, unsigned int rp,
                               int state, int is_tcp) {
@@ -394,6 +508,12 @@ static void net_table_insert(unsigned long inode, unsigned int lp,
     }
 }
 
+/**
+ * @brief Looks up a socket inode in the global network hash table.
+ *
+ * @param inode  Socket inode number to look up.
+ * @return Pointer to the matching entry, or NULL if not found.
+ */
 static const NetTableEntry *net_table_find(unsigned long inode) {
     if (!inode) return NULL;
     unsigned int h = (unsigned int)(inode * 2654435761UL) & (NET_TABLE_SLOTS - 1);
@@ -405,6 +525,15 @@ static const NetTableEntry *net_table_find(unsigned long inode) {
     return NULL;
 }
 
+/**
+ * @brief Parses one /proc/net file and inserts all entries into s_net_table.
+ *
+ * Skips the header line; silently ignores lines that do not match the
+ * expected hex format. Called once per cycle by build_net_table().
+ *
+ * @param path    Path to the file (e.g. "/proc/net/tcp").
+ * @param is_tcp  1 if the file contains TCP entries, 0 for UDP.
+ */
 static void parse_net_file_global(const char *path, int is_tcp) {
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -422,6 +551,13 @@ static void parse_net_file_global(const char *path, int is_tcp) {
     fclose(f);
 }
 
+/**
+ * @brief Builds the global network inode table from all four /proc/net files.
+ *
+ * Clears s_net_table, repopulates it from tcp, tcp6, udp, and udp6, then
+ * sets s_net_table_ready so fillNetworkFromInodes() uses the fast path.
+ * Must be called once per cycle before processing any process's sockets.
+ */
 static void build_net_table(void) {
     memset(s_net_table, 0, sizeof(s_net_table));
     parse_net_file_global("/proc/net/tcp",  1);
@@ -431,8 +567,19 @@ static void build_net_table(void) {
     s_net_table_ready = 1;
 }
 
-/* Fallback used only for single-process inspection (-i) when build_net_table()
-   was not called: parses /proc/net files directly for a known inode set. */
+/**
+ * @brief Fallback network resolver for single-process inspection (-i flag).
+ *
+ * Used only when build_net_table() was not called (i.e. the global table is
+ * not ready). Parses /proc/net files directly for a known inode set.
+ * In full-cycle mode this path is never taken.
+ *
+ * @param info         Destination struct whose network sub-struct will be filled.
+ * @param inodes       Set of socket inodes to look up.
+ * @param inode_count  Number of entries in inodes.
+ * @param path         Path to the /proc/net file to parse.
+ * @param is_tcp       1 for TCP files, 0 for UDP.
+ */
 static void parseNetFileDirect(ProcessInfo *info, const unsigned long *inodes,
                                 int inode_count, const char *path, int is_tcp) {
     FILE *f = fopen(path, "r");
@@ -462,6 +609,16 @@ static void parseNetFileDirect(ProcessInfo *info, const unsigned long *inodes,
     fclose(f);
 }
 
+/**
+ * @brief Resolves a set of socket inodes into connection and port data.
+ *
+ * Fast path (after build_net_table()): O(count) hash-table lookups.
+ * Fallback (-i mode, s_net_table_ready == 0): reads all four /proc/net files directly.
+ *
+ * @param info    Destination struct whose network sub-struct will be filled.
+ * @param inodes  Socket inodes collected from /proc/<pid>/fd.
+ * @param count   Number of valid entries in inodes.
+ */
 static void fillNetworkFromInodes(ProcessInfo *info,
                                    const unsigned long *inodes, int count) {
     if (s_net_table_ready) {
@@ -485,6 +642,16 @@ static void fillNetworkFromInodes(ProcessInfo *info,
     }
 }
 
+/**
+ * @brief Reads /proc/<pid>/io and computes read/write byte rates.
+ *
+ * Rates are computed as the byte delta divided by elapsed_ms converted to
+ * seconds. Both rates are left at zero when prev is NULL or elapsed_ms == 0.
+ *
+ * @param info  Destination struct.
+ * @param pid   Target process ID.
+ * @param prev  Previous capture for the same PID (may be NULL).
+ */
 static void fillIoInfo(ProcessInfo *info, int pid, const ProcessInfo *prev) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/io", pid);
@@ -513,6 +680,18 @@ static void fillIoInfo(ProcessInfo *info, int pid, const ProcessInfo *prev) {
 
 /* ── Public API: process capture ─────────────────────────────────────────── */
 
+/**
+ * @brief Captures a full ProcessInfo snapshot for the given PID.
+ *
+ * Orchestrates all fill* helpers in the correct order. On the first pass
+ * (elapsed_ms == 0, prev == NULL) rate-based fields (CPU %, I/O rates) will
+ * be zero and are populated on the second pass once a prev snapshot exists.
+ *
+ * @param pid         Target process ID.
+ * @param elapsed_ms  Milliseconds since prev was captured; 0 skips rate fields.
+ * @param prev        Previous snapshot for the same PID (may be NULL).
+ * @return Heap-allocated ProcessInfo, or NULL on allocation failure. Caller must free().
+ */
 ProcessInfo *getProcessInfo(int pid, double elapsed_ms, const ProcessInfo *prev) {
     ProcessInfo *info = calloc(1, sizeof(ProcessInfo));
     if (!info) return NULL;
@@ -536,6 +715,14 @@ ProcessInfo *getProcessInfo(int pid, double elapsed_ms, const ProcessInfo *prev)
     return info;
 }
 
+/**
+ * @brief Prints a human-readable summary of a ProcessInfo to stdout.
+ *
+ * Intended for interactive use (-i flag) and plain-text output mode.
+ * Prints all sub-structs: identity, metrics, network, fd, and scoring.
+ *
+ * @param info  Process snapshot to print. Must not be NULL.
+ */
 void printProcessInfo(const ProcessInfo *info) {
     if (!info) { printf("NULL\n"); return; }
 
@@ -603,6 +790,17 @@ void printProcessInfo(const ProcessInfo *info) {
 
 /* ── OCP: Table-driven scoring rules ─────────────────────────────────────── */
 
+/**
+ * @brief Linear ramp membership function for fuzzy logic scoring.
+ *
+ * Returns 0.0 when val <= low, 1.0 when val >= high, and a linear
+ * interpolation between the two extremes otherwise.
+ *
+ * @param val   Metric value to evaluate.
+ * @param low   Ramp start  (membership = 0.0 at or below this).
+ * @param high  Ramp end    (membership = 1.0 at or above this).
+ * @return Membership degree in [0.0, 1.0].
+ */
 static float fuzzy_high(float val, float low, float high) {
     if (val <= low)  return 0.0f;
     if (val >= high) return 1.0f;
@@ -649,6 +847,15 @@ static const ScoringRule RULES[] = {
 
 /* ── JSON output ─────────────────────────────────────────────────────────── */
 
+/**
+ * @brief Writes a JSON-safe quoted string to stdout (RFC 8259 escaping).
+ *
+ * Escapes ", \, \n, \r, \t, and all control characters below 0x20.
+ * Writes surrounding double-quote characters. Used by printProcessJson()
+ * and exported as json_print_str() for use in main.c.
+ *
+ * @param s  NUL-terminated string to encode. Must not be NULL.
+ */
 static void json_str(const char *s) {
     putchar('"');
     for (; *s; s++) {
@@ -670,6 +877,16 @@ static void json_str(const char *s) {
 
 void json_print_str(const char *s) { json_str(s); }
 
+/**
+ * @brief Prints a complete JSON object for a ProcessInfo to stdout.
+ *
+ * Serialises all sub-structs: identity, metrics, network, fd, and scoring.
+ * The triggered_rules array is built on-the-fly by re-evaluating each rule,
+ * so rule memberships do not need to be stored in the struct between calls.
+ * Does NOT print a trailing newline; the caller must add one if needed.
+ *
+ * @param info  Process snapshot to serialise. Must not be NULL.
+ */
 void printProcessJson(const ProcessInfo *info) {
     printf("{\n");
     printf("  \"pid\": %d,\n",    info->pid);
@@ -698,11 +915,12 @@ void printProcessJson(const ProcessInfo *info) {
     printf("    \"vsz_kb\": %.0f,\n",         info->metrics.vsz);
     printf("    \"utime\": %lu,\n",           info->metrics.utime);
     printf("    \"stime\": %lu,\n",           info->metrics.stime);
-    printf("    \"fork_rate\": %lu,\n",       info->metrics.fork_rate);
-    printf("    \"io_read_bytes\": %lu,\n",   info->metrics.io_read_bytes);
-    printf("    \"io_write_bytes\": %lu,\n",  info->metrics.io_write_bytes);
-    printf("    \"io_read_bps\": %.2f,\n",    info->metrics.io_read_bps);
-    printf("    \"io_write_bps\": %.2f\n",    info->metrics.io_write_bps);
+    printf("    \"fork_rate\": %lu,\n",            info->metrics.fork_rate);
+    printf("    \"zombie_child_count\": %d,\n",    info->metrics.zombie_child_count);
+    printf("    \"io_read_bytes\": %lu,\n",        info->metrics.io_read_bytes);
+    printf("    \"io_write_bytes\": %lu,\n",       info->metrics.io_write_bytes);
+    printf("    \"io_read_bps\": %.2f,\n",         info->metrics.io_read_bps);
+    printf("    \"io_write_bps\": %.2f\n",         info->metrics.io_write_bps);
     printf("  },\n");
 
     printf("  \"network\": {\n");
@@ -796,13 +1014,30 @@ static void buildBaselineDeviation(ProcessInfo *info) {
     }
 }
 
+/**
+ * @brief Scores a process and returns whether it exceeds the anomaly threshold.
+ *
+ * Calls scoreProcess() to populate anomaly_score and alert_flags, then
+ * buildBaselineDeviation() to build the human-readable flag summary string.
+ *
+ * @param info  Process to score. scoring fields are written in place.
+ * @return 1 if anomaly_score >= ANOMALY_THRESHOLD (0.30), 0 otherwise.
+ */
 int isSuspicious(ProcessInfo *info) {
     scoreProcess(info);
     buildBaselineDeviation(info);
     return (info->scoring.anomaly_score >= ANOMALY_THRESHOLD) ? 1 : 0;
 }
 
-/** Prints triggered rules with membership values. Separate from detection. */
+/**
+ * @brief Prints a one-line header and all active alert rules for a process.
+ *
+ * Binary alerts (full weight) are prefixed with [!]; partial fuzzy alerts
+ * with [~], followed by the membership value μ and the contribution percentage.
+ * Intended for plain-text output mode; separate from scoring logic.
+ *
+ * @param info  Scored process to report. Must not be NULL.
+ */
 void printProcessAlerts(const ProcessInfo *info) {
     printf("--- PID %d (%s)  score=%.2f  flags=0x%03X ---\n",
            info->pid, info->name,
@@ -822,7 +1057,15 @@ void printProcessAlerts(const ProcessInfo *info) {
 
 /* ── SRP: analize() decomposed into focused helpers ─────────────────────── */
 
-/** First-pass: fills prev_table with a ProcessInfo for each PID in the snapshot. */
+/**
+ * @brief First-pass: captures a ProcessInfo for every PID in the snapshot.
+ *
+ * Called before the SAMPLE_INTERVAL_MS sleep so the second pass can compute
+ * CPU and I/O rate deltas against these baseline readings.
+ *
+ * @param prev_table  PID-indexed lookup table (size MAX_PROCESSES, caller-allocated).
+ * @param snap        Snapshot whose actPids define the PIDs to capture.
+ */
 static void fillPrevTable(ProcessInfo **prev_table, const PidSnapshot *snap) {
     for (int i = 0; i < snap->actCount; i++) {
         int pid = snap->actPids[i];
@@ -830,7 +1073,21 @@ static void fillPrevTable(ProcessInfo **prev_table, const PidSnapshot *snap) {
     }
 }
 
-/** Second-pass: scores each process, collects suspicious ones, optionally builds tree. */
+/**
+ * @brief Second-pass: scores every process and collects the suspicious ones.
+ *
+ * Iterates the second snapshot, captures a fresh ProcessInfo with rate deltas
+ * computed against prev_table, calls isSuspicious(), and optionally fills a
+ * ProcessTreeNode entry for every process (used by the legacy analize_ex path).
+ *
+ * @param prev_table      First-pass capture table indexed by PID.
+ * @param snap            Second snapshot whose actPids define the process list.
+ * @param count           Out: number of suspicious processes returned.
+ * @param tree_out        Out: if non-NULL, receives a malloc'd ProcessTreeNode array.
+ * @param tree_count_out  Out: number of nodes written to *tree_out.
+ * @return Heap-allocated array of suspicious ProcessInfo pointers. Caller must free
+ *         each pointer and the array.
+ */
 static ProcessInfo **collectSuspiciousProcesses(ProcessInfo **prev_table,
                                                   const PidSnapshot *snap,
                                                   int *count,
@@ -889,60 +1146,20 @@ static ProcessInfo **collectSuspiciousProcesses(ProcessInfo **prev_table,
     return result;
 }
 
+
 /**
- * @brief Runs the full analysis cycle and returns the suspicious processes.
+ * @brief Releases all heap allocations owned by analize_ex().
  *
- * @param count         Out: number of suspicious processes returned.
- * @param tree_out      Out: if non-NULL, receives a malloc'd array of ProcessTreeNode
- *                      for every process in the second snapshot. Caller must free().
- * @param tree_count    Out: if non-NULL, receives the number of nodes in *tree_out
- *                      (also equals the total number of processes seen).
+ * Safe to call with NULL for any argument.
  *
- * Single cleanup path via goto ensures no memory is leaked on any error.
+ * @param prev_table  PID-indexed prev capture table (size MAX_PROCESSES).
+ * @param snapshot    PidSnapshot allocated by initPidSnapshot().
+ * @param pids        Raw PID array from getPids() (may be NULL if already transferred).
  */
-ProcessInfo **analize_ex(int *count, ProcessTreeNode **tree_out, int *tree_count) {
-    *count = 0;
-    if (tree_out)   *tree_out   = NULL;
-    if (tree_count) *tree_count = 0;
-
-    ProcessInfo  **prev_table = NULL;
-    PidSnapshot   *snapshot   = NULL;
-    ProcessInfo  **suspicious = NULL;
-    int           *pids       = NULL;
-    int            pidCount   = 0;
-
-    prev_table = calloc(MAX_PROCESSES, sizeof(ProcessInfo *));
-    if (!prev_table) goto cleanup;
-
-    pids = getPids(&pidCount);
-    if (!pids) goto cleanup;
-
-    snapshot = initPidSnapshot(MAX_PROCESSES);
-    if (!snapshot) goto cleanup;
-
-    takeSnapshot(snapshot, pids, pidCount);
-    pids = NULL; /* takeSnapshot took ownership */
-
-    fillPrevTable(prev_table, snapshot);
-
-    { struct timespec _ts = { SAMPLE_INTERVAL_MS / 1000, (long)(SAMPLE_INTERVAL_MS % 1000) * 1000000L }; nanosleep(&_ts, NULL); }
-
-    pids = getPids(&pidCount);
-    if (!pids) goto cleanup;
-
-    takeSnapshot(snapshot, pids, pidCount);
-    pids = NULL;
-
-    build_net_table();
-
-    suspicious = collectSuspiciousProcesses(prev_table, snapshot, count,
-                                            tree_out, tree_count);
-
-cleanup:
+static void free_ex_resources(ProcessInfo **prev_table, PidSnapshot *snapshot, int *pids) {
     if (prev_table) {
-        for (int i = 0; i < MAX_PROCESSES; i++) {
-            if (prev_table[i]) { free(prev_table[i]); }
-        }
+        for (int i = 0; i < MAX_PROCESSES; i++)
+            if (prev_table[i]) free(prev_table[i]);
         free(prev_table);
     }
     if (snapshot) {
@@ -951,10 +1168,72 @@ cleanup:
         free(snapshot);
     }
     free(pids);
+}
+/**
+ * @brief Runs the full analysis cycle and returns the suspicious processes.
+ *
+ * @param count         Out: number of suspicious processes returned.
+ * @param tree_out      Out: if non-NULL, receives a malloc'd array of ProcessTreeNode
+ *                      for every process in the second snapshot. Caller must free().
+ * @param tree_count    Out: if non-NULL, receives the number of nodes in *tree_out
+ *                      (also equals the total number of processes seen).
+ */
+ProcessInfo **analize_ex(int *count, ProcessTreeNode **tree_out, int *tree_count) {
+    *count = 0;
+    if (tree_out)   *tree_out   = NULL;
+    if (tree_count) *tree_count = 0;
 
+    ProcessInfo  **prev_table = NULL;
+    PidSnapshot   *snapshot   = NULL;
+    int           *pids       = NULL;
+    int            pidCount   = 0;
+
+    prev_table = calloc(MAX_PROCESSES, sizeof(ProcessInfo *));
+    if (!prev_table) return NULL;
+
+    pids = getPids(&pidCount);
+    if (!pids) { free_ex_resources(prev_table, NULL, NULL); return NULL; }
+
+    snapshot = initPidSnapshot(MAX_PROCESSES);
+    if (!snapshot) { 
+        free_ex_resources(prev_table, NULL, pids);
+        return NULL; 
+    }
+
+    takeSnapshot(snapshot, pids, pidCount);
+    pids = NULL;
+    fillPrevTable(prev_table, snapshot);
+
+    { 
+        struct timespec _ts = { 
+            SAMPLE_INTERVAL_MS / 1000, (long)(SAMPLE_INTERVAL_MS % 1000) * 1000000L 
+        };
+        nanosleep(&_ts, NULL); 
+    }
+
+    pids = getPids(&pidCount);
+    if (!pids) { free_ex_resources(prev_table, snapshot, NULL); return NULL; }
+
+    takeSnapshot(snapshot, pids, pidCount);
+    pids = NULL;
+
+    build_net_table();
+
+    ProcessInfo **suspicious = collectSuspiciousProcesses(prev_table, snapshot, count,
+                                                          tree_out, tree_count);
+    free_ex_resources(prev_table, snapshot, NULL);
     return suspicious;
 }
 
+/**
+ * @brief Runs one analysis cycle and returns only the suspicious processes.
+ *
+ * Thin wrapper around analize_ex() that discards the process-tree output.
+ *
+ * @param count  Out: number of suspicious processes returned.
+ * @return Heap-allocated array of ProcessInfo pointers, or NULL on failure.
+ *         Each pointer and the array itself must be freed by the caller.
+ */
 ProcessInfo **analize(int *count) {
     return analize_ex(count, NULL, NULL);
 }
@@ -962,6 +1241,7 @@ ProcessInfo **analize(int *count) {
 
 /* ── analize_full: three-tier process classification ────────────────────── */
 
+/* Metric accessors used as callbacks by select_top_n(). */
 static float get_cpu     (const ProcessInfo *p) { return p->metrics.cpuUsage;            }
 static float get_rss     (const ProcessInfo *p) { return p->metrics.rss;                 }
 static float get_io_write(const ProcessInfo *p) { return (float)p->metrics.io_write_bps; }
@@ -999,6 +1279,14 @@ static void select_top_n(ProcessInfo **arr, int count,
         top_selected[top_idxs[k]] = 1;
 }
 
+/**
+ * @brief Frees all memory owned by an AnalysisResult.
+ *
+ * Frees each ProcessInfo in suspicious, notable, and top_resources,
+ * the three pointer arrays, the tree array, and the result struct itself.
+ *
+ * @param r  Result to free. Safe to call with NULL.
+ */
 void free_analysis_result(AnalysisResult *r) {
     if (!r) return;
     for (int i = 0; i < r->suspicious_count;   i++) free(r->suspicious[i]);
@@ -1012,6 +1300,56 @@ void free_analysis_result(AnalysisResult *r) {
 }
 
 /**
+ * @brief Cross-process pass: marks every process that has zombie children.
+ *
+ * Called after all processes are scored individually. Iterates all_procs[]
+ * twice: first to tally zombie children per parent PID, then to apply the
+ * ALERT_ZOMBIE_PARENT flag and score bump to any parent that has at least one.
+ *
+ * A process with zombie children is deliberately ignoring SIGCHLD / not calling
+ * wait() — a strong indicator of malicious behaviour (fork bomb staging, resource
+ * exhaustion, or a crashed daemon that spawned workers it no longer reaps).
+ */
+static void apply_zombie_parent_scoring(ProcessInfo **procs, int count) {
+    /* Pass 1: for each zombie, increment its parent's zombie_child_count. */
+    for (int i = 0; i < count; i++) {
+        if (!procs[i] || procs[i]->state != 'Z') continue;
+        int ppid = procs[i]->ppid;
+        for (int j = 0; j < count; j++) {
+            if (procs[j] && procs[j]->pid == ppid) {
+                procs[j]->metrics.zombie_child_count++;
+                break;
+            }
+        }
+    }
+
+    /* Pass 2: apply flag + score to any process with zombie children. */
+    for (int i = 0; i < count; i++) {
+        if (!procs[i] || procs[i]->metrics.zombie_child_count == 0) continue;
+        ProcessScoring *s = &procs[i]->scoring;
+        s->alert_flags |= ALERT_ZOMBIE_PARENT;
+
+        /*
+         * Weight: 0.40 — same as DELETED_EXE. A process accumulating zombie
+         * children without reaping them is a significant anomaly. Scale with
+         * count: each extra zombie adds 0.05, capped at 0.55 total.
+         */
+        float extra = 0.05f * (float)(procs[i]->metrics.zombie_child_count - 1);
+        if (extra > 0.15f) extra = 0.15f;
+        s->anomaly_score += 0.40f + extra;
+        if (s->anomaly_score > 1.0f) s->anomaly_score = 1.0f;
+
+        size_t len = strlen(s->baseline_deviation);
+        if (len < sizeof(s->baseline_deviation) - 20) {
+            if (len > 0) s->baseline_deviation[len++] = ' ';
+            snprintf(s->baseline_deviation + len,
+                     sizeof(s->baseline_deviation) - len,
+                     "ZOMBIE_PARENT(%d)", procs[i]->metrics.zombie_child_count);
+        }
+    }
+}
+
+/**
  * @brief Runs a full analysis cycle and classifies every process into three tiers.
  *
  * @param include_tree  If non-zero, allocates and fills result->tree with minimal
@@ -1019,6 +1357,57 @@ void free_analysis_result(AnalysisResult *r) {
  * @return Heap-allocated AnalysisResult. Free with free_analysis_result().
  *         Returns NULL on allocation or /proc read failure.
  */
+/**
+ * @brief Releases all intermediate allocations from analize_full().
+ *
+ * On the error path (partitioned == 0), also calls free_analysis_result().
+ * On the success path (partitioned == 1), all_procs entries have already been
+ * transferred to result tiers and must NOT be freed here.
+ *
+ * @param prev_table   PID-indexed prev capture table (may be NULL).
+ * @param snapshot     PidSnapshot (may be NULL).
+ * @param all_procs    Flat array of all scored ProcessInfo pointers.
+ * @param all_count    Number of valid entries in all_procs.
+ * @param claimed      Boolean array: 1 if all_procs[i] was placed in a tier.
+ * @param top_selected Boolean array: 1 if all_procs[i] is in top_resources.
+ * @param pids         Raw PID array from getPids() (may be NULL if already consumed).
+ * @param result       The AnalysisResult being built.
+ * @param partitioned  1 = success (return result), 0 = failure (free result, return NULL).
+ * @return result on success, NULL on failure.
+ */
+static AnalysisResult *analize_full_cleanup(
+    ProcessInfo **prev_table, PidSnapshot *snapshot,
+    ProcessInfo **all_procs, int all_count,
+    int *claimed, int *top_selected, int *pids,
+    AnalysisResult *result, int partitioned)
+{
+    if (!partitioned && all_procs)
+        for (int i = 0; i < all_count; i++)
+            if (all_procs[i]) free(all_procs[i]);
+
+    free(all_procs);
+    free(claimed);
+    free(top_selected);
+
+    if (prev_table) {
+        for (int i = 0; i < MAX_PROCESSES; i++)
+            if (prev_table[i]) free(prev_table[i]);
+        free(prev_table);
+    }
+    if (snapshot) {
+        free(snapshot->actPids);
+        free(snapshot->prevPids);
+        free(snapshot);
+    }
+    free(pids);
+
+    if (!partitioned) {
+        free_analysis_result(result);
+        return NULL;
+    }
+    return result;
+}
+
 AnalysisResult *analize_full(int include_tree) {
     AnalysisResult *result = calloc(1, sizeof(AnalysisResult));
     if (!result) return NULL;
@@ -1031,16 +1420,19 @@ AnalysisResult *analize_full(int include_tree) {
     int           *pids         = NULL;
     int            pidCount     = 0;
     int            all_count    = 0;
-    int            partitioned  = 0;
+
+#define FULL_FAIL() \
+    return analize_full_cleanup(prev_table, snapshot, all_procs, all_count, \
+                                claimed, top_selected, pids, result, 0)
 
     prev_table = calloc(MAX_PROCESSES, sizeof(ProcessInfo *));
-    if (!prev_table) goto cleanup;
+    if (!prev_table) FULL_FAIL();
 
     pids = getPids(&pidCount);
-    if (!pids) goto cleanup;
+    if (!pids) FULL_FAIL();
 
     snapshot = initPidSnapshot(MAX_PROCESSES);
-    if (!snapshot) goto cleanup;
+    if (!snapshot) FULL_FAIL();
 
     takeSnapshot(snapshot, pids, pidCount);
     pids = NULL;
@@ -1048,14 +1440,14 @@ AnalysisResult *analize_full(int include_tree) {
     { struct timespec _ts = { SAMPLE_INTERVAL_MS / 1000, (long)(SAMPLE_INTERVAL_MS % 1000) * 1000000L }; nanosleep(&_ts, NULL); }
 
     pids = getPids(&pidCount);
-    if (!pids) goto cleanup;
+    if (!pids) FULL_FAIL();
     takeSnapshot(snapshot, pids, pidCount);
     pids = NULL;
 
     build_net_table();
 
     all_procs = calloc(snapshot->actCount, sizeof(ProcessInfo *));
-    if (!all_procs) goto cleanup;
+    if (!all_procs) FULL_FAIL();
 
     if (include_tree)
         result->tree = calloc(snapshot->actCount, sizeof(ProcessTreeNode));
@@ -1081,12 +1473,24 @@ AnalysisResult *analize_full(int include_tree) {
             node->anomaly_score = info->scoring.anomaly_score;
             node->cpu_percent   = info->metrics.cpuUsage;
             node->rss_kb        = info->metrics.rss;
+            node->alert_flags   = info->scoring.alert_flags;
             memcpy(node->username, info->identity.username, sizeof(node->username));
         }
 
         all_procs[all_count++] = info;
     }
     result->tree_count = all_count;
+
+    /* Cross-process pass: flag parents of zombie children. */
+    apply_zombie_parent_scoring(all_procs, all_count);
+
+    /* Refresh tree node scores and flags to reflect the post-pass updates. */
+    if (result->tree)
+        for (int i = 0; i < all_count; i++) {
+            result->tree[i].is_suspicious = (all_procs[i]->scoring.anomaly_score >= ANOMALY_THRESHOLD);
+            result->tree[i].anomaly_score  = all_procs[i]->scoring.anomaly_score;
+            result->tree[i].alert_flags    = all_procs[i]->scoring.alert_flags;
+        }
 
     /* Count tiers. */
     int n_susp = 0, n_notable = 0;
@@ -1098,11 +1502,13 @@ AnalysisResult *analize_full(int include_tree) {
 
     result->suspicious = malloc((n_susp    > 0 ? n_susp    : 1) * sizeof(ProcessInfo *));
     result->notable    = malloc((n_notable > 0 ? n_notable : 1) * sizeof(ProcessInfo *));
-    if (!result->suspicious || !result->notable) goto cleanup;
+    if (!result->suspicious || !result->notable) FULL_FAIL();
 
     claimed      = calloc(all_count, sizeof(int));
     top_selected = calloc(all_count, sizeof(int));
-    if (!claimed || !top_selected) goto cleanup;
+    if (!claimed || !top_selected) FULL_FAIL();
+
+#undef FULL_FAIL
 
     /* Partition tier 1 (suspicious) and tier 2 (notable). */
     int si = 0, ni = 0;
@@ -1137,8 +1543,6 @@ AnalysisResult *analize_full(int include_tree) {
                     result->top_resources[ti++] = all_procs[i];
             result->top_resources_count = n_top;
         } else {
-            /* malloc failed: free top_selected processes to avoid leak.
-               top_resources_count stays 0, so free_analysis_result is safe. */
             for (int i = 0; i < all_count; i++)
                 if (top_selected[i]) free(all_procs[i]);
         }
@@ -1149,33 +1553,6 @@ AnalysisResult *analize_full(int include_tree) {
         if (!claimed[i] && !top_selected[i])
             free(all_procs[i]);
 
-    partitioned = 1;
-
-cleanup:
-    /* If we failed before partitioning, free all collected ProcessInfo*. */
-    if (!partitioned && all_procs)
-        for (int i = 0; i < all_count; i++)
-            if (all_procs[i]) free(all_procs[i]);
-
-    free(all_procs);
-    free(claimed);
-    free(top_selected);
-
-    if (prev_table) {
-        for (int i = 0; i < MAX_PROCESSES; i++)
-            if (prev_table[i]) free(prev_table[i]);
-        free(prev_table);
-    }
-    if (snapshot) {
-        free(snapshot->actPids);
-        free(snapshot->prevPids);
-        free(snapshot);
-    }
-    free(pids);
-
-    if (!partitioned) {
-        free_analysis_result(result);
-        return NULL;
-    }
-    return result;
+    return analize_full_cleanup(prev_table, snapshot, all_procs, all_count,
+                                claimed, top_selected, NULL, result, 1);
 }
