@@ -1,11 +1,4 @@
-/* ── NodeDetail ──────────────────────────────────────────────────────────── */
-
-function critInfo(score) {
-  if (score >= 0.60) return { label: 'Critical',   color: 'var(--c-critical)'   }
-  if (score >= 0.30) return { label: 'Suspicious', color: 'var(--c-suspicious)' }
-  if (score >= 0.05) return { label: 'Notable',    color: 'var(--c-notable)'    }
-  return { label: 'Normal', color: 'var(--c-normal)' }
-}
+import { getSeverityInfo, getActiveFlags } from '../services/processService'
 
 function MetricBar({ label, value, max, unit, color }) {
   const pct = Math.min(100, max > 0 ? (value / max) * 100 : 0)
@@ -38,14 +31,14 @@ function Row({ k, v }) {
 }
 
 export default function NodeDetail({ node, onClose }) {
-  const crit    = critInfo(node.anomalyScore)
-  const ramMb   = (node.rssKb / 1024).toFixed(1)
-  const ramMax  = Math.max(node.rssKb / 1024, 256)
+  const sev    = getSeverityInfo(node.anomalyScore)
+  const flags  = getActiveFlags(node.alertFlags)
+  const ramMb  = (node.rssKb / 1024).toFixed(1)
+  const ramMax = Math.max(node.rssKb / 1024, 256)
 
   return (
     <aside className="nd-panel">
 
-      {/* Header */}
       <div className="nd-header">
         <div>
           <p className="nd-pid">PID {node.pid}</p>
@@ -54,48 +47,43 @@ export default function NodeDetail({ node, onClose }) {
         <button className="nd-close" onClick={onClose} title="Close (Esc)">✕</button>
       </div>
 
-      {/* Badges */}
       <div className="nd-badges">
-        <Badge label={crit.label}                   color={crit.color}             />
+        <Badge label={sev.label}                    color={sev.color}              />
         <Badge label={`State: ${node.state}`}       color="var(--c-muted)"         />
         <Badge label={`${node.threads} threads`}    color="var(--c-muted)"         />
         {node.suspicious && <Badge label="⚠ Suspicious" color="var(--c-suspicious)" />}
       </div>
 
-      {/* Anomaly score */}
       <section className="nd-section">
         <p className="nd-section-title">Anomaly Score</p>
         <div className="nd-score-row">
-          <span className="nd-score-big" style={{ color: crit.color }}>
+          <span className="nd-score-big" style={{ color: sev.color }}>
             {(node.anomalyScore * 100).toFixed(1)}%
           </span>
-          <span className="nd-score-tag" style={{ color: crit.color }}>
-            {crit.label}
+          <span className="nd-score-tag" style={{ color: sev.color }}>
+            {sev.label}
           </span>
         </div>
-        <MetricBar label="" value={node.anomalyScore} max={1} unit="" color={crit.color} />
+        <MetricBar label="" value={node.anomalyScore} max={1} unit="" color={sev.color} />
       </section>
 
-      {/* Resources */}
+      {flags.length > 0 && (
+        <section className="nd-section">
+          <p className="nd-section-title">Alert Flags</p>
+          <div className="nd-badges">
+            {flags.map(([, label, color]) => (
+              <Badge key={label} label={label} color={color} />
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="nd-section">
         <p className="nd-section-title">Resources</p>
-        <MetricBar
-          label="CPU"
-          value={node.cpuPercent}
-          max={100}
-          unit="%"
-          color="var(--c-cpu)"
-        />
-        <MetricBar
-          label="RAM"
-          value={parseFloat(ramMb)}
-          max={ramMax}
-          unit=" MB"
-          color="var(--c-ram)"
-        />
+        <MetricBar label="CPU" value={node.cpuPercent} max={100}    unit="%" color="var(--c-cpu)" />
+        <MetricBar label="RAM" value={parseFloat(ramMb)} max={ramMax} unit=" MB" color="var(--c-ram)" />
       </section>
 
-      {/* Identity */}
       <section className="nd-section">
         <p className="nd-section-title">Identity</p>
         <div className="nd-grid">

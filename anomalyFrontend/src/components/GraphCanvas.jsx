@@ -1,21 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
-
-/* ── Color helpers ───────────────────────────────────────────────────────── */
-
-function nodeColor(score) {
-  if (score >= 0.60) return '#f85149'
-  if (score >= 0.30) return '#f0883e'
-  if (score >= 0.05) return '#d29922'
-  if (score >  0)   return '#3fb950'
-  return '#30363d'
-}
-
-function nodeRadius(rssKb) {
-  return Math.max(3, Math.log2(Math.max(rssKb, 512) / 512) * 2.2 + 3)
-}
-
-/* ── Component ───────────────────────────────────────────────────────────── */
+import { getNodeColor, getNodeRadius } from '../services/processService'
 
 export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
   const containerRef = useRef()
@@ -26,19 +11,17 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
    * nodeMapRef: pid → stable node object.
    * D3 attaches x, y, vx, vy directly onto these objects. As long as we never
    * replace the object (only mutate its properties), D3 keeps the position state
-   * and the simulation does NOT restart. This is the core of the stable-graph approach.
+   * and the simulation does NOT restart.
    */
   const nodeMapRef = useRef(new Map())
 
   /*
-   * graphData state is only updated when the PID set changes (process added or removed).
-   * For data-only updates (same PIDs, different scores/metrics) we mutate in place and
-   * never call setGraphData — so ForceGraph2D never gets a new prop reference and the
-   * D3 simulation never reheats.
+   * graphData is only updated when the PID set changes (process added or removed).
+   * For data-only updates we mutate in place and skip setGraphData entirely —
+   * ForceGraph2D never gets a new prop reference and the simulation never reheats.
    */
   const [graphData, setGraphData] = useState({ nodes: [], links: [] })
 
-  /* ── Canvas size ─────────────────────────────────────────────────────────── */
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -49,7 +32,6 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
     return () => ro.disconnect()
   }, [])
 
-  /* ── D3 forces — re-applied after every structural update ────────────────── */
   useEffect(() => {
     const fg = graphRef.current
     if (!fg) return
@@ -57,7 +39,6 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
     fg.d3Force('link').distance(90)
   }, [graphData])
 
-  /* ── Node merge logic ────────────────────────────────────────────────────── */
   useEffect(() => {
     if (!nodes || nodes.length === 0) return
 
@@ -68,12 +49,6 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
     const removed    = [...currentPids].filter(p => !incomingPids.has(p))
     const structural = added.length > 0 || removed.length > 0
 
-    /*
-     * Mutate existing node objects in place.
-     * Because the same object reference stays in graphData.nodes, D3 keeps
-     * its x/y/vx/vy state untouched. The canvas picks up the new values on
-     * the next animation frame without any simulation restart.
-     */
     for (const n of nodes) {
       const obj = nodeMapRef.current.get(n.pid)
       if (obj) {
@@ -88,16 +63,10 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
       }
     }
 
-    if (!structural) return  // data-only update — done, no graphData change needed
+    if (!structural) return
 
-    /* ── Structural change: add / remove nodes ── */
-
-    for (const n of added) {
-      nodeMapRef.current.set(n.pid, { ...n, id: n.pid })
-    }
-    for (const pid of removed) {
-      nodeMapRef.current.delete(pid)
-    }
+    for (const n of added)   nodeMapRef.current.set(n.pid, { ...n, id: n.pid })
+    for (const pid of removed) nodeMapRef.current.delete(pid)
 
     const allNodes = [...nodeMapRef.current.values()]
     const pidSet   = new Set(allNodes.map(n => n.id))
@@ -105,19 +74,12 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
       .filter(n => n.ppid > 0 && pidSet.has(n.ppid) && n.ppid !== n.id)
       .map(n => ({ source: n.ppid, target: n.id }))
 
-    /*
-     * New object reference tells ForceGraph2D something changed. It will merge
-     * existing node positions (preserving x/y) and do a partial reheat only for
-     * the new/removed nodes. Existing nodes stay roughly in place.
-     */
     setGraphData({ nodes: allNodes, links })
   }, [nodes])
 
-  /* ── Canvas renderers ────────────────────────────────────────────────────── */
-
   const paintNode = useCallback((node, ctx, globalScale) => {
-    const r        = nodeRadius(node.rssKb)
-    const color    = nodeColor(node.anomalyScore)
+    const r        = getNodeRadius(node.rssKb)
+    const color    = getNodeColor(node.anomalyScore)
     const selected = node.id === selectedNodeId
 
     if (selected || node.anomalyScore >= 0.30) {
@@ -150,7 +112,7 @@ export default function GraphCanvas({ nodes, onNodeClick, selectedNodeId }) {
   const paintPointer = useCallback((node, color, ctx) => {
     ctx.fillStyle = color
     ctx.beginPath()
-    ctx.arc(node.x, node.y, nodeRadius(node.rssKb) + 3, 0, 2 * Math.PI)
+    ctx.arc(node.x, node.y, getNodeRadius(node.rssKb) + 3, 0, 2 * Math.PI)
     ctx.fill()
   }, [])
 

@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import GraphCanvas from './components/GraphCanvas'
-import NodeDetail  from './components/NodeDetail'
-
-const API = '/api'
+import GraphCanvas  from './components/GraphCanvas'
+import NodeDetail   from './components/NodeDetail'
+import EventHistory from './components/EventHistory'
+import * as sse     from './services/sseService'
+import { parseCycleData } from './services/processService'
 
 const LEGEND = [
   { color: 'var(--c-critical)',   label: 'Critical    ≥ 0.60' },
@@ -13,45 +14,39 @@ const LEGEND = [
 ]
 
 export default function App() {
+  const [tab,        setTab]        = useState('live')
   const [cycle,      setCycle]      = useState(null)
   const [nodes,      setNodes]      = useState([])
   const [selected,   setSelected]   = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [loading,    setLoading]    = useState(true)
   const [error,      setError]      = useState(null)
+  const [alertCount, setAlertCount] = useState(0)
 
   useEffect(() => {
-    const source = new EventSource(`${API}/stream`)
+    sse.connect()
 
-    source.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        setCycle({
-          id:                data.id,
-          agentId:           data.agentId,
-          cycleNumber:       data.cycleNumber,
-          timestamp:         data.timestamp,
-          totalProcesses:    data.totalProcesses,
-          suspiciousCount:   data.suspiciousCount,
-          notableCount:      data.notableCount,
-          topResourcesCount: data.topResourcesCount,
-        })
-        if (data.tree) setNodes(data.tree)
-        setLastUpdate(new Date())
-        setLoading(false)
-        setError(null)
-      } catch {
-        // ignore malformed events
-      }
-    }
+    const unsubCycle = sse.onCycle((data) => {
+      setCycle(parseCycleData(data))
+      if (data.tree) setNodes(data.tree)
+      setLastUpdate(new Date())
+      setLoading(false)
+      setError(null)
+    })
 
-    source.onerror = () => {
+    const unsubAlert = sse.onAlert(() => setAlertCount(n => n + 1))
+
+    const unsubError = sse.onError(() => {
       setError('Cannot connect to backend at localhost:8080')
       setLoading(false)
-      // EventSource auto-reconnects — keep source open
-    }
+    })
 
-    return () => source.close()
+    return () => {
+      unsubCycle()
+      unsubAlert()
+      unsubError()
+      sse.disconnect()
+    }
   }, [])
 
   useEffect(() => {
@@ -60,6 +55,11 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  const switchTab = (t) => {
+    setTab(t)
+    if (t === 'history') setAlertCount(0)
+  }
+
   return (
     <div className="app">
 
@@ -67,14 +67,33 @@ export default function App() {
       <header className="header">
         <div className="header-left">
           <span className="header-title">Process Anomaly Detection</span>
-          {cycle && (
+          {cycle && tab === 'live' && (
             <span className="header-meta">
               {cycle.agentId} &nbsp;·&nbsp; cycle #{cycle.cycleNumber}
             </span>
           )}
         </div>
+
+        <div className="tab-nav">
+          <button
+            className={`tab-btn ${tab === 'live' ? 'active' : ''}`}
+            onClick={() => switchTab('live')}
+          >
+            Live
+          </button>
+          <button
+            className={`tab-btn ${tab === 'history' ? 'active' : ''}`}
+            onClick={() => switchTab('history')}
+          >
+            History
+            {alertCount > 0 && tab !== 'history' && (
+              <span className="alert-badge">{alertCount > 99 ? '99+' : alertCount}</span>
+            )}
+          </button>
+        </div>
+
         <div className="header-right">
-          {cycle && (
+          {cycle && tab === 'live' && (
             <>
               <Pill value={cycle.totalProcesses}  label="processes"  color="var(--c-idle)"       />
               <Pill value={cycle.notableCount}     label="notable"    color="var(--c-notable)"    />
@@ -88,35 +107,44 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Main canvas ── */}
-      <main className="main">
-        {loading ? (
-          <Centered>Waiting for first cycle…</Centered>
-        ) : error ? (
-          <Centered error>{error}</Centered>
-        ) : nodes.length === 0 ? (
-          <Centered>No process data yet. Is the agent running?</Centered>
-        ) : (
-          <>
-            <GraphCanvas
-              nodes={nodes}
-              onNodeClick={setSelected}
-              selectedNodeId={selected?.pid ?? null}
-            />
-            <div className="legend">
-              {LEGEND.map(({ color, label }) => (
-                <div key={label} className="legend-item">
-                  <span className="legend-dot" style={{ background: color }} />
-                  <span>{label}</span>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </main>
+      {/* ── Live view ── */}
+      {tab === 'live' && (
+        <main className="main">
+          {loading ? (
+            <Centered>Waiting for first cycle…</Centered>
+          ) : error ? (
+            <Centered error>{error}</Centered>
+          ) : nodes.length === 0 ? (
+            <Centered>No process data yet. Is the agent running?</Centered>
+          ) : (
+            <>
+              <GraphCanvas
+                nodes={nodes}
+                onNodeClick={setSelected}
+                selectedNodeId={selected?.pid ?? null}
+              />
+              <div className="legend">
+                {LEGEND.map(({ color, label }) => (
+                  <div key={label} className="legend-item">
+                    <span className="legend-dot" style={{ background: color }} />
+                    <span>{label}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </main>
+      )}
+
+      {/* ── History view ── */}
+      {tab === 'history' && (
+        <main className="main main--history">
+          <EventHistory />
+        </main>
+      )}
 
       {/* ── Detail panel ── */}
-      {selected && (
+      {selected && tab === 'live' && (
         <NodeDetail node={selected} onClose={() => setSelected(null)} />
       )}
     </div>
