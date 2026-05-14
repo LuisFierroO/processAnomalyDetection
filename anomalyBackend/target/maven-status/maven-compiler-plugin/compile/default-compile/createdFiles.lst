@@ -2,13 +2,17 @@ com/anomaly/detection/model/AnalysisCycle.class
 com/anomaly/detection/dto/ProcessDto$TriggeredRule.class
 com/anomaly/detection/model/ProcessTier.class
 com/anomaly/detection/dto/ProcessDto$Metrics.class
+com/anomaly/detection/model/EventSeverity.class
 com/anomaly/detection/dto/ProcessDto$Identity.class
 com/anomaly/detection/dto/ProcessTreeNodeDto.class
 com/anomaly/detection/service/SseService.class
 com/anomaly/detection/model/ProcessTreeRecord.class
 com/anomaly/detection/controller/CycleController.class
 com/anomaly/detection/service/CycleService.class
+com/anomaly/detection/controller/SuspiciousEventController.class
 com/anomaly/detection/dto/ProcessDto.class
+com/anomaly/detection/model/SuspiciousEvent.class
+com/anomaly/detection/repository/SuspiciousEventRepository.class
 com/anomaly/detection/dto/CycleDto.class
 com/anomaly/detection/repository/CycleRepository.class
 com/anomaly/detection/controller/CycleController$CycleSummary.class
@@ -21,3 +25,5 @@ com/anomaly/detection/repository/ProcessRepository.class
 com/anomaly/detection/dto/ProcessDto$Fd.class
 com/anomaly/detection/AnomalyDetectionApplication.class
 com/anomaly/detection/service/CycleService$LiveCycleEvent.class
+com/anomaly/detection/service/SuspiciousEventService.class
+com/anomaly/detection/dto/SuspiciousEventDto.class
